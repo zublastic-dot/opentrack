@@ -188,6 +188,13 @@ void invalid_inputs_and_dropouts()
         require(tracker.diagnostics().solver == (gap_ms < 250 ? PoseDiagnostics::Solver::continuity : PoseDiagnostics::Solver::posit),
                 "timeout did not choose the intended recovery path");
     }
+    const auto moved_points = project(rotation(5, 0), {0, 0, 700}, camera);
+    PointTrackerTestAccess::frame(tracker, {moved_points[0], moved_points[1]}, model, camera, true, 100);
+    require(!tracker.diagnostics().accepted, "moving two-point frame must remain held");
+    PointTrackerTestAccess::frame(tracker, moved_points, model, camera, true, 150);
+    require(tracker.diagnostics().accepted && tracker.diagnostics().solver == PoseDiagnostics::Solver::continuity &&
+            rotation_error(tracker.pose().R, rotation(5, 0)) < 0.25,
+            "brief dropout with a small head turn did not recover continuously");
     const Affine after_recovery = tracker.pose();
     auto nonfinite = points;
     nonfinite[1][0] = std::numeric_limits<f>::quiet_NaN();
