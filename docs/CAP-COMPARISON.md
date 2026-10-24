@@ -2,6 +2,12 @@
 
 This experimental fork tests pose continuity for a tall, asymmetric three-LED cap. It is based on opentrack 2023.2.0 (`1ea5bb0aa7f2f271724ded372957b6f3759fa5a8`) to retain the Windows 32-bit DirectShow camera path. It does not establish that a real camera tracking problem has been fixed.
 
+## Current result: experimental solver failed acceptance
+
+Windows build [40133831814](https://github.com/zublastic-dot/opentrack/actions/runs/40133831814), commit `76b721678bf652c43ea3c741d22b1342893fa627`, compiled successfully. The production C++ regression reported a maximum orientation error of **40.0526 degrees for both the original and experimental solvers**, then failed. Later tests in that executable did not run after this failure. This is a diagnostic fork, not a demonstrated tracking fix. Keep the experimental solver off for normal use.
+
+Bounded follow-up probes with actual OpenCV 4.6 Python bindings also reproduced a fold from a known-correct initial pose. Prediction helped some noiseless paths but failed with small centroid noise or reversals; soft motion constraints introduced lag and still failed representative paths. These unshipped probes do not justify a replacement algorithm. Real camera observations must still distinguish optical point loss from ambiguous pose estimation.
+
 ## Scope
 
 The optional solver refines the previous accepted pose against the current three image points using OpenCV's `solvePnPRefineLM`. After initialization or a configured timeout, PointTracker's existing POSIT initializer is still used. Three points can have multiple valid poses: a small reprojection error alone cannot prove the chosen orientation is correct. This change also cannot reconstruct an LED that is hidden or outside the camera's view.
@@ -12,14 +18,14 @@ The synthetic regression uses the production C++ PointTracker, the measured tria
 
 Extract the artifact into its own writable directory. Keep `portable.txt` next to `opentrack.exe`; on Windows this makes opentrack use `globals.ini` and `ini/*.ini` inside that directory instead of the installed application's settings. Do not copy the experimental DLLs over an existing installation.
 
-Copy a known profile into the portable `ini` directory and give it a distinct name. In its `[tracker-pt]` section:
+For diagnostic recording, copy a known profile into the portable `ini` directory and give it a distinct name. Keep its `[tracker-pt]` section on the original solver:
 
 ```ini
 dynamic-pose-resolution=true
-continuity-pose-solver=true
+continuity-pose-solver=false
 ```
 
-The experimental option defaults to false and can also be toggled in PointTracker's camera settings. Leave point geometry and camera settings unchanged for the first A/B comparison. Start while facing forward with all three LEDs visible. Use opentrack's preview for initial tests with the game closed.
+The experimental option defaults to false. Setting it to true, or checking the corresponding PointTracker option, enables the failed experimental solver for deliberate reproduction only. Leave point geometry and camera settings unchanged when comparing recorded observations. Start while facing forward with all three LEDs visible. Use opentrack's preview for initial tests with the game closed.
 
 For numeric diagnostics, set `pose-diagnostics-path` in the same section to an absolute, new CSV filename. An empty path disables logging. The logger refuses to overwrite an existing file and stops after 18,000 camera-frame rows. Logs include extracted coordinates, point correspondence, accepted/held status, pose, and available solver diagnostics; they contain no camera images. Logging is intended for short diagnosis, not normal play.
 
