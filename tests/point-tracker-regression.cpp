@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <random>
@@ -25,6 +26,13 @@ struct PointTrackerTestAccess
                         const std::array<vec2, 3>& points, f focal, const Affine& pose)
     {
         return tracker.measure_pose(model, points, focal, 640, pose);
+    }
+    static void seed_known_pose(PointTracker& tracker, const Affine& pose)
+    {
+        tracker.X_CM = pose;
+        tracker.X_CM_expected = pose;
+        tracker.init_phase = false;
+        tracker.t.start();
     }
 };
 }
@@ -104,14 +112,20 @@ std::vector<std::pair<double, double>> regression_path()
 }
 
 double run_path(bool continuity, const std::vector<std::pair<double, double>>& path,
-                const std::array<int, 3>& permutation, double noise_px = 0)
+                const std::array<int, 3>& permutation, double noise_px = 0,
+                bool seed_known_pose = false)
 {
     PointTracker tracker;
     const auto camera = camera_info();
+    if (seed_known_pose)
+        PointTrackerTestAccess::seed_known_pose(tracker,
+            Affine(mat33(rotation(path.front().first, path.front().second)), {0, 0, 700}));
     std::mt19937 random(20231024);
     std::normal_distribution<double> noise(0, 1);
     double maximum_error = 0;
     unsigned frame_index = 0;
+    unsigned printed_frames = 0;
+    std::array<unsigned, 3> solver_frames {};
     for (const auto& [yaw, pitch] : path)
     {
         const cv::Matx33d truth = rotation(yaw, pitch);
@@ -124,6 +138,29 @@ double run_path(bool continuity, const std::vector<std::pair<double, double>>& p
         const std::vector<vec2> shuffled {points[permutation[0]], points[permutation[1]], points[permutation[2]]};
         PointTrackerTestAccess::frame(tracker, shuffled, model, camera, continuity);
         const auto& diagnostics = tracker.diagnostics();
+        ++solver_frames[(unsigned)diagnostics.solver];
+        const double error = rotation_error(tracker.pose().R, truth);
+        // Bound CI output while retaining the initial pose and first major divergence.
+        if (printed_frames < 20 &&
+            (frame_index <= 5 || !diagnostics.accepted || error > maximum_error + 1))
+        {
+            ++printed_frames;
+            std::cout << "TRACE continuity=" << continuity << " known_seed=" << seed_known_pose
+                      << " permutation=" << permutation[0] << permutation[1] << permutation[2]
+                      << " frame=" << frame_index-1 << " truth=" << yaw << ',' << pitch
+                      << " error_deg=" << error << " accepted=" << diagnostics.accepted
+                      << " solver=" << (int)diagnostics.solver << " reset=" << (int)diagnostics.reset
+                      << " iterations=" << diagnostics.iterations << " converged=" << diagnostics.converged
+                      << " residual_px=" << diagnostics.residual_max_px << " match=";
+            for (int match : diagnostics.correspondence) std::cout << match << ',';
+            std::cout << " R=";
+            for (f value : tracker.pose().R.val) std::cout << value << ',';
+            std::cout << " t=";
+            for (f value : tracker.pose().t.val) std::cout << value << ',';
+            std::cout << " observed=";
+            for (const auto& point : shuffled) std::cout << point[0] << ',' << point[1] << ',';
+            std::cout << '\n';
+        }
         require(diagnostics.accepted, "valid synthetic trajectory rejected at yaw=" + std::to_string(yaw) +
                 " pitch=" + std::to_string(pitch));
         if (continuity)
@@ -132,8 +169,11 @@ double run_path(bool continuity, const std::vector<std::pair<double, double>>& p
             require(std::isfinite(diagnostics.residual_max_px) && diagnostics.residual_max_px <= 1,
                     "published pose exceeds residual gate");
         }
-        maximum_error = std::max(maximum_error, rotation_error(tracker.pose().R, truth));
+        maximum_error = std::max(maximum_error, error);
     }
+    std::cout << "TRACE summary continuity=" << continuity << " known_seed=" << seed_known_pose
+              << " held_frames=" << solver_frames[0] << " posit_frames=" << solver_frames[1]
+              << " continuity_frames=" << solver_frames[2] << '\n';
     return maximum_error;
 }
 
@@ -144,6 +184,11 @@ void regression_and_permutations()
     std::cout << "Original POSIT maximum rotation error: " << baseline_error << " degrees\n";
     require(baseline_error > 10, "the real legacy solver must reproduce the reported branch regression");
 
+    // Diagnostic separation only: this bypasses initialization with ground truth.
+    // It cannot replace the end-to-end assertion below or establish startup correctness.
+    const double seeded_error = run_path(true, path, {0, 1, 2}, 0, true);
+    std::cout << "Known-correct seed diagnostic maximum error: " << seeded_error << " degrees\n";
+
     std::array<int, 3> permutation {{0, 1, 2}};
     do
     {
@@ -153,6 +198,7 @@ void regression_and_permutations()
         require(candidate_error < 0.25, "continuity candidate failed the exact smooth regression");
     }
     while (std::next_permutation(permutation.begin(), permutation.end()));
+    require(seeded_error < 0.25, "known-correct seed failed to retain the exact trajectory");
 }
 
 void wider_range_and_noise()
@@ -166,6 +212,38 @@ void wider_range_and_noise()
     std::cout << "Wide yaw range error: " << exact_error << "; 0.1-pixel noise error: " << noisy_error << '\n';
     require(exact_error < 0.25, "wide-range exact yaw regression");
     require(noisy_error < 5, "small centroid noise produces excessive pose error");
+}
+
+void disabled_dynamic_ignores_continuity_setting()
+{
+    const auto camera = camera_info();
+    PointTracker unchecked, retained_checked;
+    const auto compare_frame = [&](const std::vector<vec2>& points)
+    {
+        PointTrackerTestAccess::frame(unchecked, points, model, camera, false, 1000./60, 0);
+        PointTrackerTestAccess::frame(retained_checked, points, model, camera, true, 1000./60, 0);
+        const auto& baseline = unchecked.diagnostics();
+        const auto& retained = retained_checked.diagnostics();
+        require(baseline.accepted == retained.accepted &&
+                baseline.solver == retained.solver && baseline.reset == retained.reset &&
+                baseline.iterations == retained.iterations &&
+                baseline.correspondence == retained.correspondence,
+                "disabled Dynamic pose must ignore the retained experimental setting");
+        require(baseline.solver == PoseDiagnostics::Solver::posit,
+                "disabled Dynamic pose unexpectedly selected refinement");
+        require(cv::norm(unchecked.pose().R-retained_checked.pose().R) == 0 &&
+                cv::norm(unchecked.pose().t-retained_checked.pose().t) == 0,
+                "retained experimental setting changed the disabled-Dynamic pose");
+    };
+    for (const auto& [yaw, pitch] : regression_path())
+        compare_frame(project(rotation(yaw, pitch), {0, 0, 700}, camera));
+
+    // A deliberate outlier distinguishes legacy acceptance from the experiment's
+    // residual gate; good-fit observations alone would miss the stale-checkbox bug.
+    compare_frame({{f(-.22), f(-.34)}, {f(-.02), f(.16)}, {f(.29), f(.09)}});
+    require(unchecked.diagnostics().accepted &&
+            (!unchecked.diagnostics().positive_depth || unchecked.diagnostics().residual_max_px > 1),
+            "compatibility fixture must exercise a pose rejected by the experimental gate");
 }
 
 void invalid_inputs_and_dropouts()
@@ -219,9 +297,14 @@ void invalid_inputs_and_dropouts()
 
 int main()
 {
+    std::cout << std::setprecision(9);
+    std::cout << "TRACE solver: 0=held, 1=POSIT, 2=continuity; reset: 0=none, 1=initial, "
+                 "2=timeout, 3=dynamic-disabled, 4=duplicate-match, 5=missing-points, "
+                 "6=invalid-input, 7=rejected-pose\n";
     require(model.valid(), "measured custom model is invalid");
     regression_and_permutations();
     wider_range_and_noise();
+    disabled_dynamic_ignores_continuity_setting();
     invalid_inputs_and_dropouts();
     std::cout << "PointTracker source regressions passed. This does not establish real-camera acceptance.\n";
     return 0;

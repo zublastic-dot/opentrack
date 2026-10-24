@@ -217,7 +217,10 @@ void PointTracker::track_impl(const std::vector<vec2>& points,
 
     const Affine previous = X_CM;
     const Affine previous_expected = X_CM_expected;
-    const bool use_continuity = continuity && !init_phase;
+    // A checked but disabled UI option must not change the legacy path when
+    // Dynamic pose is off, including its initialization acceptance criteria.
+    const bool continuity_enabled = continuity && init_phase_timeout > 0;
+    const bool use_continuity = continuity_enabled && !init_phase;
     diagnostics_.solver = use_continuity ? PoseDiagnostics::Solver::continuity : PoseDiagnostics::Solver::posit;
     bool accepted;
     if (use_continuity)
@@ -230,7 +233,7 @@ void PointTracker::track_impl(const std::vector<vec2>& points,
         const bool valid = measure_pose(model, order, fx, info.res_x, X_CM);
         // Preserve original POSIT acceptance with the experiment disabled. For
         // the candidate, a finite iteration-limit result is not a usable-fit guarantee.
-        if (continuity)
+        if (continuity_enabled)
             accepted = accepted && valid && diagnostics_.residual_max_px <= 1.0;
     }
     if (accepted)

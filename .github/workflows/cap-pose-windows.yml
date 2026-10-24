@@ -37,7 +37,7 @@ jobs:
 
       - name: Restore the small OpenCV x86 SDK
         id: opencv-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: deps/opencv-install
           key: cap-opencv-4.6.0-win32-vs2022-dshow-calib3d-v1
@@ -63,6 +63,13 @@ jobs:
           cmake --build deps/opencv-build --config Release --target INSTALL --parallel 4
           if ($LASTEXITCODE) { throw 'OpenCV build failed' }
 
+      - name: Cache the completed OpenCV SDK independently of later tests
+        if: steps.opencv-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: deps/opencv-install
+          key: cap-opencv-4.6.0-win32-vs2022-dshow-calib3d-v1
+
       - name: Configure the isolated comparison build
         shell: pwsh
         run: |
@@ -77,6 +84,7 @@ jobs:
           if ($LASTEXITCODE) { throw 'opentrack configuration failed' }
 
       - name: Compile and install into the artifact folder
+        id: compile
         shell: pwsh
         run: |
           cmake --build build-cap --config Release --target INSTALL --parallel 4
@@ -97,6 +105,8 @@ jobs:
           }
           'Keep this file: settings stay inside this comparison bundle.' | Set-Content portable-cap/portable.txt
           Copy-Item docs/CAP-COMPARISON.md portable-cap/CAP-COMPARISON.md
+          Copy-Item build-cap/tests/Release/opentrack-cap-regression.exe portable-cap/
+          git rev-parse HEAD | Set-Content portable-cap/SOURCE-COMMIT.txt
 
       - name: Run the actual PointTracker regression
         shell: pwsh
@@ -105,7 +115,6 @@ jobs:
           $env:QT_QPA_PLATFORM = 'offscreen'
           ctest --test-dir build-cap -C Release --output-on-failure
           if ($LASTEXITCODE) { throw 'PointTracker regression failed' }
-          git rev-parse HEAD | Set-Content portable-cap/SOURCE-COMMIT.txt
 
       - name: Save test diagnostics
         if: always()
@@ -122,6 +131,15 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: opentrack-cap-x86-${{ github.sha }}
+          path: portable-cap/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Preserve a failing comparison for offline diagnosis
+        if: failure() && steps.compile.conclusion == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cap-comparison-unaccepted-${{ github.sha }}
           path: portable-cap/
           if-no-files-found: error
           retention-days: 1

@@ -27,6 +27,6 @@ Returning to the installed executable restores the stock solver. Profiles in the
 
 ## Build
 
-The `Cap pose Windows comparison` workflow builds Windows x86 with Qt 5.15.2, OpenCV 4.6.0, and Visual Studio 2022. Its artifact includes `SOURCE-COMMIT.txt` identifying the exact tested commit. The bundle selects PointTracker, DirectShow/OpenCV video, Accela, and the existing FreeTrack output; it installs no camera driver and changes no game settings.
+The `Cap pose Windows comparison` workflow builds Windows x86 with Qt 5.15.2, OpenCV 4.6.0, and Visual Studio 2022. Its artifact includes `SOURCE-COMMIT.txt` identifying the exact commit. Only the `opentrack-cap-x86-*` artifact has passed the regression; `cap-comparison-unaccepted-*` preserves a failed run for diagnosis and must not be treated as a working fix. The bundle selects PointTracker, DirectShow/OpenCV video, Accela, and the existing FreeTrack output; it installs no camera driver and changes no game settings.
 
 Configure with `OPENTRACK_CAP_ONLY=ON` and `OPENTRACK_CAP_TESTS=ON`, build/install, and run `ctest --test-dir build-cap -C Release --output-on-failure`. Successful synthetic tests are necessary but not sufficient for real-camera acceptance.

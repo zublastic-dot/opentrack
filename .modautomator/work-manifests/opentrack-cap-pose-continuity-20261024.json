@@ -1,5 +1,14 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "value_case": {
+    "category": "demonstrated_blocker",
+    "statement": "The owner reports reversed or folded cap tracking; a separate compatible build is needed to test whether previous-pose refinement improves the measured three-point model.",
+    "acceptance": [
+      "An actual Windows x86 build runs the production PointTracker regression and exposes the difference between the legacy solver and candidate on the measured triangle.",
+      "The comparison artifact starts with the existing PS3 Eye driver and isolated opentrack profiles.",
+      "Real-camera acceptance requires the previously failing motion to track correctly; synthetic test success alone is not completion of headtracking calibration."
+    ]
+  },
   "work_id": "opentrack-cap-pose-continuity-20261024",
   "lease_id": "20261024T2105Z-codex-opentrack-fork",
   "worker_id": "codex-opentrack-cap",
