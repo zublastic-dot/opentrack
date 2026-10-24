@@ -257,6 +257,16 @@
             </property>
            </widget>
           </item>
+          <item row="12" column="0" colspan="2">
+           <widget class="QCheckBox" name="continuity_pose_solver">
+            <property name="text">
+             <string>Experimental pose continuity</string>
+            </property>
+            <property name="toolTip">
+             <string>Requires Dynamic pose. Refines each tracked pose from the previous accepted pose. Initial pose and recovery after a long loss can still be ambiguous.</string>
+            </property>
+           </widget>
+          </item>
           <item row="1" column="1">
            <widget class="QSpinBox" name="res_x_spin">
             <property name="sizePolicy">

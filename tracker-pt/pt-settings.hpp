@@ -62,6 +62,9 @@ struct pt_settings final : options::opts
 
     value<bool> dynamic_pose { b, "dynamic-pose-resolution", false };
     value<int> init_phase_timeout { b, "init-phase-timeout", 250 };
+    value<bool> continuity_pose_solver { b, "continuity-pose-solver", false };
+    // Empty disables logging. An explicit new filename is required; existing files are never replaced.
+    value<QString> pose_diagnostics_path { b, "pose-diagnostics-path", "" };
     value<bool> auto_threshold { b, "automatic-threshold", true };
     value<pt_color_type> blob_color { b, "blob-color", pt_color_bt709 };
     value<bool> use_mjpeg { b, "use-mjpeg", false };

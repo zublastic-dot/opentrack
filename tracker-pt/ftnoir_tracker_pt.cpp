@@ -21,6 +21,8 @@
 #include <QDebug>
 #include <QFile>
 #include <QCoreApplication>
+#include <QTextStream>
+#include <QDateTime>
 
 using namespace options;
 
@@ -90,24 +92,23 @@ void Tracker_PT::run()
             point_extractor->extract_points(*frame, *preview_frame, preview_visible && !widget->fresh(), points);
             point_count.store(points.size(), std::memory_order_relaxed);
 
-            const bool success = points.size() >= PointModel::N_POINTS;
-
             Affine X_CM;
+            PoseDiagnostics diagnostics;
+            const PointModel model(s);
 
             {
                 QMutexLocker l(&center_lock);
-
-                if (success)
-                {
-                    int dynamic_pose_ms = s.dynamic_pose ? s.init_phase_timeout : 0;
-
-                    point_tracker.track(points, PointModel(s), info, dynamic_pose_ms, filter, camera->deadzone_amount());
-                    ever_success.store(true, std::memory_order_relaxed);
-                }
-
                 QMutexLocker l2(&data_lock);
+
+                const int dynamic_pose_ms = s.dynamic_pose ? s.init_phase_timeout : 0;
+                point_tracker.track(points, model, info, dynamic_pose_ms, filter,
+                                    camera->deadzone_amount(), s.continuity_pose_solver);
+                diagnostics = point_tracker.diagnostics();
+                if (diagnostics.accepted)
+                    ever_success.store(true, std::memory_order_relaxed);
                 X_CM = point_tracker.pose();
             }
+            record_diagnostics(diagnostics, model, info, X_CM);
 
             if (preview_visible && !widget->fresh())
             {
@@ -123,6 +124,72 @@ void Tracker_PT::run()
             }
         }
     }
+}
+
+void Tracker_PT::record_diagnostics(const PoseDiagnostics& d, const PointModel& model,
+                                    const pt_camera_info& info, const Affine& pose)
+{
+    const QString requested_path = s.pose_diagnostics_path;
+    if (requested_path != diagnostics_path)
+    {
+        diagnostics_file.close();
+        diagnostics_path = requested_path;
+        diagnostics_rows = 0;
+        diagnostics_timer.start();
+        if (!requested_path.isEmpty())
+        {
+            diagnostics_file.setFileName(requested_path);
+            if (!diagnostics_file.open(QIODevice::WriteOnly | QIODevice::NewOnly | QIODevice::Text))
+                qWarning() << "pt: diagnostic CSV must be a new writable file:" << diagnostics_file.errorString();
+            else
+            {
+                QTextStream out(&diagnostics_file);
+                out << "utc,elapsed_ms,frame,point_count,accepted,solver,reset,age_ms,iterations,converged,branch,branch_distance_1,branch_distance_2,delta,residual_rms_px,residual_max_px,positive_depth,width,height,fov,m01_x,m01_y,m01_z,m02_x,m02_y,m02_z";
+                for (int i = 0; i < 3; ++i)
+                    out << ",input_" << i << "_x,input_" << i << "_y,match_" << i << ",ordered_" << i << "_x,ordered_" << i << "_y";
+                for (int row = 0; row < 3; ++row)
+                    for (int col = 0; col < 3; ++col)
+                        out << ",r" << row << col;
+                out << ",tx_mm,ty_mm,tz_mm\n";
+            }
+        }
+    }
+    if (!diagnostics_file.isOpen())
+        return;
+    // At most five minutes at 60 FPS. Do not silently reopen or overwrite a log.
+    if (diagnostics_rows >= 18000)
+    {
+        diagnostics_file.close();
+        return;
+    }
+    const char* reset_names[] = {"none", "initial", "timeout", "dynamic_disabled", "duplicate_match",
+                                 "insufficient_points", "invalid_input", "rejected_pose"};
+    const char* solver_names[] = {"held", "posit", "continuity"};
+    QTextStream out(&diagnostics_file);
+    out.setRealNumberPrecision(12);
+    out << QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs) << ','
+        << diagnostics_timer.elapsed_ms() << ',' << diagnostics_rows++ << ',' << d.point_count << ','
+        << d.accepted << ',' << solver_names[(int)d.solver] << ',' << reset_names[(int)d.reset] << ','
+        << d.elapsed_ms << ',' << d.iterations << ',' << d.converged << ',' << d.branch << ','
+        << d.branch_distance_1 << ',' << d.branch_distance_2 << ',' << d.convergence_delta << ','
+        << d.residual_rms_px << ',' << d.residual_max_px << ',' << d.positive_depth << ','
+        << info.res_x << ',' << info.res_y << ',' << info.fov;
+    for (const vec3& v : {model.M01, model.M02})
+        for (int axis = 0; axis < 3; ++axis)
+            out << ',' << v[axis];
+    for (unsigned i = 0; i < 3; ++i)
+    {
+        const double x = i < points.size() ? points[i][0] : std::numeric_limits<double>::quiet_NaN();
+        const double y = i < points.size() ? points[i][1] : std::numeric_limits<double>::quiet_NaN();
+        out << ',' << x << ',' << y << ',' << d.correspondence[i] << ','
+            << d.ordered_points[i][0] << ',' << d.ordered_points[i][1];
+    }
+    for (f value : pose.R.val)
+        out << ',' << value;
+    for (f value : pose.t.val)
+        out << ',' << value;
+    out << '\n';
+    out.flush();
 }
 
 module_status Tracker_PT::start_tracker(QFrame* video_frame)

@@ -1,0 +1,10 @@
+if(NOT TARGET opentrack-tracker-pt-base)
+    message(FATAL_ERROR "Cap pose tests require PointTracker and OpenCV")
+endif()
+
+add_executable(opentrack-cap-regression point-tracker-regression.cpp)
+target_link_libraries(opentrack-cap-regression PRIVATE opentrack-tracker-pt-base)
+if(MSVC)
+    target_compile_options(opentrack-cap-regression PRIVATE -EHsc -U_HAS_EXCEPTIONS -D_HAS_EXCEPTIONS=1)
+endif()
+add_test(NAME cap-pose-regression COMMAND opentrack-cap-regression)

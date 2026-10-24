@@ -11,6 +11,7 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
+#include <opencv2/calib3d.hpp>
 
 #include <QDebug>
 
@@ -35,6 +36,28 @@ static void set_row(mat33& m, int i, const vec3& v)
 PointModel::PointModel(const pt_settings& s)
 {
     set_model(s);
+    initialize_geometry();
+}
+
+PointModel::PointModel(const vec3& m01, const vec3& m02) : M01(m01), M02(m02)
+{
+    initialize_geometry();
+}
+
+void PointModel::initialize_geometry()
+{
+    // Reject zero/collinear/nonfinite geometry before the reciprocal Gram determinant.
+    const cv::Vec3d a(M01), b(M02);
+    const double scale = a.dot(a) * b.dot(b);
+    const double determinant = a.cross(b).dot(a.cross(b));
+    valid_ = std::isfinite(scale) && std::isfinite(determinant) && scale > 0 &&
+             determinant > scale * 1e-10;
+    if (!valid_)
+    {
+        u = vec3(0, 0, 0);
+        P = mat22::zeros();
+        return;
+    }
     // calculate u
     u = M01.cross(M02);
     u = cv::normalize(u);
@@ -44,6 +67,8 @@ PointModel::PointModel(const pt_settings& s)
     f s12 = M01.dot(M02);
     f s22 = M02.dot(M02);
     P = 1/(s11*s22-s12*s12) * mat22(s22, -s12, -s12,  s11);
+    for (f value : P.val)
+        valid_ = valid_ && std::isfinite(value);
 }
 
 void PointModel::set_model(const pt_settings& s)
@@ -124,10 +149,12 @@ PointTracker::PointOrder PointTracker::find_correspondences_previous(const vec2*
         if (point_taken[min_idx])
         {
             reset_state();
+            diagnostics_.reset = PoseDiagnostics::Reset::duplicate_match;
             return find_correspondences(points, model);
         }
         point_taken[min_idx] = true;
         p[i] = points[min_idx];
+        diagnostics_.correspondence[i] = (int)min_idx;
     }
 
     return p;
@@ -138,26 +165,165 @@ void PointTracker::track(const std::vector<vec2>& points,
                          const pt_camera_info& info,
                          int init_phase_timeout,
                          point_filter& filter,
-                         f deadzone_amount)
+                          f deadzone_amount,
+                          bool continuity)
 {
+    track_impl(points, model, info, init_phase_timeout, &filter, deadzone_amount,
+               continuity, t.elapsed_ms());
+}
+
+void PointTracker::track_impl(const std::vector<vec2>& points,
+                             const PointModel& model, const pt_camera_info& info,
+                             int init_phase_timeout, point_filter* filter,
+                             f deadzone_amount, bool continuity, double elapsed_ms)
+{
+    diagnostics_ = {};
+    diagnostics_.point_count = (unsigned)points.size();
+    diagnostics_.elapsed_ms = elapsed_ms;
+    if (points.size() < PointModel::N_POINTS)
+    {
+        diagnostics_.reset = PoseDiagnostics::Reset::insufficient_points;
+        return;
+    }
+    if (!model.valid() || info.res_x <= 0 || info.res_y <= 0 ||
+        !std::isfinite(info.fov) || info.fov <= 0 || info.fov >= 180)
+    {
+        diagnostics_.reset = PoseDiagnostics::Reset::invalid_input;
+        return;
+    }
+    for (unsigned i = 0; i < PointModel::N_POINTS; ++i)
+        if (!std::isfinite(points[i][0]) || !std::isfinite(points[i][1]))
+        {
+            diagnostics_.reset = PoseDiagnostics::Reset::invalid_input;
+            return;
+        }
     const f fx = pt_camera_info::get_focal_length(info.fov, info.res_x, info.res_y);
     PointOrder order;
 
-    if (init_phase || init_phase_timeout <= 0 || t.elapsed_ms() > init_phase_timeout)
+    if (init_phase || init_phase_timeout <= 0 || elapsed_ms > init_phase_timeout)
     {
+        diagnostics_.reset = init_phase ? PoseDiagnostics::Reset::initial :
+                             init_phase_timeout <= 0 ? PoseDiagnostics::Reset::dynamic_disabled :
+                                                       PoseDiagnostics::Reset::timeout;
         reset_state();
         order = find_correspondences(points.data(), model);
     }
     else
         order = find_correspondences_previous(points.data(), model, info);
 
-    if (POSIT(model, filter(order, deadzone_amount), fx) != -1)
+    if (filter)
+        order = (*filter)(order, deadzone_amount);
+    diagnostics_.ordered_points = order;
+
+    const Affine previous = X_CM;
+    const Affine previous_expected = X_CM_expected;
+    const bool use_continuity = continuity && !init_phase;
+    diagnostics_.solver = use_continuity ? PoseDiagnostics::Solver::continuity : PoseDiagnostics::Solver::posit;
+    bool accepted;
+    if (use_continuity)
+        accepted = refine_pose(model, order, fx, info.res_x);
+    else
     {
+        const int iterations = POSIT(model, order, fx);
+        diagnostics_.iterations = iterations;
+        accepted = iterations != -1;
+        const bool valid = measure_pose(model, order, fx, info.res_x, X_CM);
+        // Preserve original POSIT acceptance with the experiment disabled. For
+        // the candidate, a finite iteration-limit result is not a usable-fit guarantee.
+        if (continuity)
+            accepted = accepted && valid && diagnostics_.residual_max_px <= 1.0;
+    }
+    if (accepted)
+    {
+        diagnostics_.accepted = true;
         init_phase = false;
         t.start();
     }
     else
-        reset_state();
+    {
+        X_CM = previous;
+        X_CM_expected = previous_expected;
+        diagnostics_.reset = PoseDiagnostics::Reset::rejected_pose;
+        // Retain the last accepted pose without refreshing its age. A later timeout
+        // requests initialization; a failed refinement is not replaced by a jump.
+        if (!use_continuity)
+            reset_state();
+    }
+}
+
+bool PointTracker::measure_pose(const PointModel& model, const PointOrder& order,
+                                f focal_length, int width, const Affine& pose)
+{
+    diagnostics_.positive_depth = false;
+    for (f value : pose.R.val)
+        if (!std::isfinite(value))
+            return false;
+    for (f value : pose.t.val)
+        if (!std::isfinite(value))
+            return false;
+    const cv::Vec3d object_points[] = {{0, 0, 0}, cv::Vec3d(model.M01), cv::Vec3d(model.M02)};
+    const cv::Matx33d rotation(pose.R);
+    const cv::Vec3d translation(pose.t);
+    double squared_error = 0, maximum = 0;
+    for (unsigned i = 0; i < PointModel::N_POINTS; ++i)
+    {
+        const cv::Vec3d p = rotation * object_points[i] + translation;
+        if (!std::isfinite(p[2]) || p[2] <= 1e-6)
+            return false;
+        const double dx = (focal_length * p[0] / p[2] - order[i][0]) * width;
+        const double dy = (focal_length * p[1] / p[2] - order[i][1]) * width;
+        const double error = dx*dx + dy*dy;
+        if (!std::isfinite(error))
+            return false;
+        squared_error += error;
+        maximum = std::max(maximum, error);
+    }
+    diagnostics_.positive_depth = true;
+    diagnostics_.residual_rms_px = std::sqrt(squared_error / PointModel::N_POINTS);
+    diagnostics_.residual_max_px = std::sqrt(maximum);
+    return true;
+}
+
+bool PointTracker::refine_pose(const PointModel& model, const PointOrder& order,
+                               f focal_length, int width)
+{
+    diagnostics_.iterations = -1;
+    try
+    {
+        const std::vector<cv::Point3d> object_points {
+            {0, 0, 0}, {model.M01[0], model.M01[1], model.M01[2]},
+            {model.M02[0], model.M02[1], model.M02[2]}};
+        const std::vector<cv::Point2d> image_points {
+            {order[0][0], order[0][1]}, {order[1][0], order[1][1]}, {order[2][0], order[2][1]}};
+        const cv::Matx33d intrinsics(focal_length, 0, 0, 0, focal_length, 0, 0, 0, 1);
+        cv::Mat rotation_vector;
+        cv::Rodrigues(cv::Mat(cv::Matx33d(X_CM.R)), rotation_vector);
+        cv::Mat translation = (cv::Mat_<double>(3, 1) << X_CM.t[0], X_CM.t[1], X_CM.t[2]);
+        cv::solvePnPRefineLM(object_points, image_points, intrinsics, cv::noArray(),
+                            rotation_vector, translation,
+                            cv::TermCriteria(cv::TermCriteria::COUNT | cv::TermCriteria::EPS, 50, 1e-10));
+        cv::Mat rotation;
+        cv::Rodrigues(rotation_vector, rotation);
+        Affine candidate;
+        for (int row = 0; row < 3; ++row)
+        {
+            candidate.t[row] = (f)translation.at<double>(row, 0);
+            for (int col = 0; col < 3; ++col)
+                candidate.R(row, col) = (f)rotation.at<double>(row, col);
+        }
+        if (!measure_pose(model, order, focal_length, width, candidate) ||
+            diagnostics_.residual_max_px > 1.0)
+            return false;
+        X_CM = candidate;
+        X_CM_expected = candidate;
+        // OpenCV does not expose its iteration count or convergence status. Keep
+        // those diagnostics unknown rather than inventing successful convergence.
+        return true;
+    }
+    catch (const cv::Exception&)
+    {
+        return false;
+    }
 }
 
 PointTracker::PointOrder PointTracker::find_correspondences(const vec2* points, const PointModel& model)
@@ -180,7 +346,10 @@ PointTracker::PointOrder PointTracker::find_correspondences(const vec2* points, 
     // set correspondences
     PointOrder p;
     for (unsigned i = 0; i < cnt; ++i)
+    {
         p[model_d_order[i]] = points[point_d_order[i]];
+        diagnostics_.correspondence[model_d_order[i]] = (int)point_d_order[i];
+    }
 
     return p;
 }
@@ -192,6 +361,7 @@ PointTracker::PointOrder PointTracker::find_correspondences(const vec2* points, 
 
 int PointTracker::POSIT(const PointModel& model, const PointOrder& order, f focal_length)
 {
+    diagnostics_.converged = 0;
     // POSIT algorithm for coplanar points as presented in
     // [Denis Oberkampf, Daniel F. DeMenthon, Larry S. Davis: "Iterative Pose Estimation Using Coplanar Feature Points"]
     // we use the same notation as in the paper here
@@ -285,17 +455,29 @@ int PointTracker::POSIT(const PointModel& model, const PointOrder& order, f foca
         f R_2_deviation = (f)(cv::norm(mat33::eye() - R_expected * R_2.t()));
 
         if (R_1_deviation < R_2_deviation)
+        {
             R_current = &R_1;
+            diagnostics_.branch = 1;
+        }
         else
+        {
             R_current = &R_2;
+            diagnostics_.branch = 2;
+        }
+        diagnostics_.branch_distance_1 = R_1_deviation;
+        diagnostics_.branch_distance_2 = R_2_deviation;
 
         get_row(*R_current, 2, k);
 
         // check for convergence condition
         const f delta = fabs(epsilon_1 - old_epsilon_1) + fabs(epsilon_2 - old_epsilon_2);
+        diagnostics_.convergence_delta = delta;
 
         if (delta < eps)
+        {
+            diagnostics_.converged = 1;
             break;
+        }
 
         old_epsilon_1 = epsilon_1;
         old_epsilon_2 = epsilon_2;

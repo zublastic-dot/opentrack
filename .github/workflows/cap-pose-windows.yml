@@ -1,0 +1,127 @@
+name: Cap pose Windows comparison
+
+on:
+  push:
+    branches: ['work/codex-opentrack-cap/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cap-pose-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-x86:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Install matching Qt development files
+        uses: jurplel/install-qt-action@a9c63c7c123f3069cff414e7e482d95dfa9d8125 # v4
+        with:
+          version: '5.15.2'
+          host: windows
+          target: desktop
+          arch: win32_msvc2019
+          archives: qtbase qttools qtserialport
+          cache: true
+          cache-key-prefix: cap-qt5-x86-v1
+
+      - name: Use CMake compatible with the installed-version source
+        run: python -m pip install cmake==3.31.6
+
+      - name: Restore the small OpenCV x86 SDK
+        id: opencv-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: deps/opencv-install
+          key: cap-opencv-4.6.0-win32-vs2022-dshow-calib3d-v1
+
+      - name: Build OpenCV for the existing 32-bit camera driver
+        if: steps.opencv-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch 4.6.0 https://github.com/opencv/opencv.git deps/opencv-src
+          if ($LASTEXITCODE) { throw 'OpenCV checkout failed' }
+          $revision = git -C deps/opencv-src rev-parse HEAD
+          if ($revision -ne 'b0dc474160e389b9c9045da5db49d03ae17c6a6b') { throw 'Unexpected OpenCV source revision' }
+          cmake -S deps/opencv-src -B deps/opencv-build -G 'Visual Studio 17 2022' -A Win32 `
+            "-DCMAKE_INSTALL_PREFIX=$env:GITHUB_WORKSPACE/deps/opencv-install" `
+            -DOpenCV_ARCH=x86 -DOpenCV_RUNTIME=vc17 `
+            -DBUILD_LIST=core,imgproc,imgcodecs,videoio,calib3d `
+            -DBUILD_SHARED_LIBS=ON -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF `
+            -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DBUILD_JAVA=OFF `
+            -DWITH_DSHOW=ON -DWITH_MSMF=OFF -DWITH_FFMPEG=OFF `
+            -DWITH_IPP=OFF -DWITH_ITT=OFF -DWITH_OPENCL=OFF `
+            -DCPU_BASELINE=SSE2 -DCPU_DISPATCH=
+          if ($LASTEXITCODE) { throw 'OpenCV configuration failed' }
+          cmake --build deps/opencv-build --config Release --target INSTALL --parallel 4
+          if ($LASTEXITCODE) { throw 'OpenCV build failed' }
+
+      - name: Configure the isolated comparison build
+        shell: pwsh
+        run: |
+          $qtPrefix = (& qmake -query QT_INSTALL_PREFIX).Trim()
+          if ($LASTEXITCODE -or -not $qtPrefix) { throw 'Qt development prefix is unavailable' }
+          cmake -S . -B build-cap -G 'Visual Studio 17 2022' -A Win32 `
+            "-DCMAKE_PREFIX_PATH=$qtPrefix" `
+            "-DOpenCV_DIR=$env:GITHUB_WORKSPACE/deps/opencv-install" `
+            -DOpenCV_ARCH=x86 -DOpenCV_RUNTIME=vc17 `
+            "-DCMAKE_INSTALL_PREFIX=$env:GITHUB_WORKSPACE/portable-cap" `
+            -DOPENTRACK_CAP_ONLY=ON -DOPENTRACK_CAP_TESTS=ON
+          if ($LASTEXITCODE) { throw 'opentrack configuration failed' }
+
+      - name: Compile and install into the artifact folder
+        shell: pwsh
+        run: |
+          cmake --build build-cap --config Release --target INSTALL --parallel 4
+          if ($LASTEXITCODE) { throw 'opentrack build failed' }
+          windeployqt --release --no-translations --no-opengl-sw --no-compiler-runtime portable-cap/opentrack.exe
+          if ($LASTEXITCODE) { throw 'Qt deployment failed' }
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $vsPath = (& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+          if (-not $vsPath) { throw 'Visual C++ installation was not found' }
+          $redist = Get-ChildItem -LiteralPath "$vsPath/VC/Redist/MSVC" -Directory |
+            Where-Object { $_.Name -match '^\d+\.\d+' } |
+            Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+          if (-not $redist) { throw 'Visual C++ redistributable DLL directory was not found' }
+          $crt = Join-Path $redist.FullName 'x86/Microsoft.VC143.CRT'
+          Copy-Item "$crt/*.dll" portable-cap/
+          foreach ($required in @('msvcp140.dll', 'vcruntime140.dll')) {
+            if (-not (Test-Path "portable-cap/$required")) { throw "Missing application-local runtime: $required" }
+          }
+          'Keep this file: settings stay inside this comparison bundle.' | Set-Content portable-cap/portable.txt
+          Copy-Item docs/CAP-COMPARISON.md portable-cap/CAP-COMPARISON.md
+
+      - name: Run the actual PointTracker regression
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:GITHUB_WORKSPACE/portable-cap;$env:GITHUB_WORKSPACE/portable-cap/modules;$env:PATH"
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          ctest --test-dir build-cap -C Release --output-on-failure
+          if ($LASTEXITCODE) { throw 'PointTracker regression failed' }
+          git rev-parse HEAD | Set-Content portable-cap/SOURCE-COMMIT.txt
+
+      - name: Save test diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cap-build-diagnostics-${{ github.sha }}
+          path: |
+            build-cap/Testing/Temporary/LastTest.log
+            build-cap/CMakeFiles/CMakeConfigureLog.yaml
+          if-no-files-found: ignore
+          retention-days: 1
+
+      - name: Save the tested portable comparison build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: opentrack-cap-x86-${{ github.sha }}
+          path: portable-cap/
+          if-no-files-found: error
+          retention-days: 1

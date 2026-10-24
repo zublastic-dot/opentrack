@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "work_id": "opentrack-cap-pose-continuity-20261024",
+  "lease_id": "20261024T2105Z-codex-opentrack-fork",
+  "worker_id": "codex-opentrack-cap",
+  "repository": "zublastic-dot/opentrack",
+  "work_branch": "work/codex-opentrack-cap/pose-continuity-2023.2",
+  "base_commit": "1ea5bb0aa7f2f271724ded372957b6f3759fa5a8",
+  "resources": [
+    "domain:headtracking:pose-estimation",
+    "repo:zublastic-dot/opentrack:tracker-pt",
+    "repo:zublastic-dot/opentrack:tests",
+    "repo:zublastic-dot/opentrack:cmake",
+    "repo:zublastic-dot/opentrack:CMakeLists.txt",
+    "repo:zublastic-dot/opentrack:.github/workflows",
+    "repo:zublastic-dot/opentrack:docs",
+    "repo:zublastic-dot/opentrack:compat"
+  ],
+  "paths": [
+    "tracker-pt",
+    "tests",
+    "cmake",
+    "CMakeLists.txt",
+    ".github/workflows",
+    "docs",
+    "compat"
+  ]
+}

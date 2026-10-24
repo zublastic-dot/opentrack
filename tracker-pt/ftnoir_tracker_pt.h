@@ -22,6 +22,7 @@
 #include <QThread>
 #include <QMutex>
 #include <QLayout>
+#include <QFile>
 
 namespace pt_impl {
 
@@ -48,6 +49,8 @@ struct Tracker_PT : QThread, ITracker
 private:
     void run() override;
     [[nodiscard]] bool check_camera();
+    void record_diagnostics(const PoseDiagnostics& diagnostics, const PointModel& model,
+                            const pt_camera_info& info, const Affine& pose);
 
     pointer<pt_runtime_traits> traits;
 
@@ -72,6 +75,10 @@ private:
     std::atomic<bool> open_camera_dialog_flag = false;
     mutable QMutex center_lock, data_lock;
     point_filter filter{s};
+    QFile diagnostics_file;
+    QString diagnostics_path;
+    Timer diagnostics_timer;
+    unsigned diagnostics_rows = 0;
 };
 
 } // ns pt_impl

@@ -32,6 +32,9 @@ include(opentrack-policy NO_POLICY_SCOPE)
 cmake_minimum_required(VERSION 3.13 FATAL_ERROR)
 project(opentrack)
 
+option(OPENTRACK_CAP_ONLY "Build the PointTracker/DirectShow comparison bundle" OFF)
+option(OPENTRACK_CAP_TESTS "Build the headless cap pose regression tests" OFF)
+
 # must be prior to CMakeDetermineCXXCompiler due to rpath
 if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT OR NOT CMAKE_INSTALL_PREFIX)
     set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/install" CACHE PATH "" FORCE)
@@ -89,6 +92,10 @@ add_custom_target(mrproper
 function(otr_add_subdirs)
     otr_dist_select_variant()
     get_property(_globs GLOBAL PROPERTY opentrack-subprojects)
+    if(OPENTRACK_CAP_ONLY)
+        list(FILTER _globs EXCLUDE REGEX "^(tracker|proto|filter|video)-")
+        list(APPEND _globs "tracker-pt" "proto-ft" "filter-accela" "video-opencv")
+    endif()
     otr_add_target_dirs(_globbed ${_globs})
 
     foreach(k ${_globbed})
@@ -106,6 +113,11 @@ endfunction()
 
 otr_add_subdirs()
 otr_merge_translations()
+
+if(OPENTRACK_CAP_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
 
 include(opentrack-install)
 

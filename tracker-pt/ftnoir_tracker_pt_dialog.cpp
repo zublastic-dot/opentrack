@@ -71,6 +71,9 @@ TrackerDialog_PT::TrackerDialog_PT(const QString& module_name) :
 
     tie_setting(s.dynamic_pose, ui.dynamic_pose);
     tie_setting(s.init_phase_timeout, ui.init_phase_timeout);
+    tie_setting(s.continuity_pose_solver, ui.continuity_pose_solver);
+    connect(ui.dynamic_pose, &QCheckBox::toggled, ui.continuity_pose_solver, &QWidget::setEnabled);
+    ui.continuity_pose_solver->setEnabled(s.dynamic_pose);
 
     tie_setting(s.auto_threshold, ui.auto_threshold);
 
